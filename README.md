@@ -11,7 +11,7 @@ The core features of SGLang include:
 ## Contents
 - [Install](#install)
 - [Quick Start](#quick-start)
-- [Frontend: Structured Generation Langauge (SGLang)](#frontend-structured-generation-langauge-sglang)
+- [Frontend: Structured Generation Language (SGLang)](#frontend-structured-generation-language-sglang)
 - [Backend: SGLang Runtime (SRT)](#backend-sglang-runtime-srt)
 - [Benchmark And Performance](#benchmark-and-performance)
 - [Roadmap](#roadmap)
@@ -34,8 +34,10 @@ pip install -e "python[all]"
 ```
 
 ### Notes
-- If you are using older GPUs (NVIDIA T4, V100), please use `pip install "triton>=2.2.0"` to avoid some bugs in the triton compiler
-- If you only need to use the OpenAI backend, you can avoid installing other dependencies by using `pip install sglang[openai]`
+- If you are using older GPUs (NVIDIA V100, T4), please pick the correct triton compiler version to avoid some known bugs.
+  - For NVIDIA T4, please use `pip install "triton>=2.2.0"`.
+  - For NVIDIA V100, please install the [nightly](https://triton-lang.org/main/getting-started/installation.html) version.
+- If you only need to use the OpenAI backend, you can avoid installing other dependencies by using `pip install "sglang[openai]"`
 
 ## Quick Start
 The example below shows how to use sglang to answer a mulit-turn question.
@@ -67,6 +69,8 @@ state = multi_turn_question.run(
 
 for m in state.messages():
     print(m["role"], ":", m["content"])
+
+print(state["answer_1"])
 ```
 
 ### Using Local Models
@@ -97,6 +101,8 @@ state = multi_turn_question.run(
 
 for m in state.messages():
     print(m["role"], ":", m["content"])
+
+print(state["answer_1"])
 ```
 
 ### More Examples
@@ -104,7 +110,7 @@ for m in state.messages():
 Anthropic and VertexAI (Gemini) models are also supported.
 You can find more examples at [examples/quick_start](examples/quick_start).
 
-## Frontend: Structured Generation Langauge (SGLang)
+## Frontend: Structured Generation Language (SGLang)
 
 To begin with, import sglang.
 ```python
@@ -164,7 +170,8 @@ def image_qa(s, image_file, question):
 ```
 
 ### Constrained Decoding
-Use `regex=` to specify a regular expression as a decoding constraint.
+Use `regex` to specify a regular expression as a decoding constraint.
+This is only supported for local models.
 
 ```python
 @sgl.function
@@ -215,6 +222,10 @@ for out in state.text_iter():
     print(out, end="", flush=True)
 ```
 
+### Tips and Implementation Details
+- The `choices` argument in `sgl.gen` is implemented by computing the normalized log probabilities of all choices and selecting the one with the highest probability.
+- The `regex` argument in `sgl.gen` is implemented through autoregressive decoding with logit bias masking, according to the constraints set by the regex.
+
 ## Backend: SGLang Runtime (SRT)
 The SGLang Runtime (SRT) is designed to work best with the SGLang frontend.
 However, it can also be used as a standalone API server.
@@ -228,13 +239,73 @@ python -m sglang.launch_server --model-path meta-llama/Llama-2-7b-chat-hf --port
 
 Send a request
 ```
-curl http://localhost:30000/v1/completions \
+curl http://localhost:30000/generate \
   -H "Content-Type: application/json" \
   -d '{
-    "prompt": "Say this is a test",
-    "max_tokens": 16,
-    "temperature": 0
+    "text": "Once upon a time,",
+    "sampling_params": {
+      "max_new_tokens": 16,
+      "temperature": 0
+    }
   }'
+```
+Learn more about the argument format [here](docs/sampling_params.md).
+
+### OpenAI Compatible API
+
+In addition, the server supports an experimental OpenAI-compatible API.
+
+```python
+import openai
+client = openai.Client(
+    base_url="http://127.0.0.1:30000/v1", api_key="EMPTY")
+
+# Text completion
+response = client.completions.create(
+	model="default",
+	prompt="The capital of France is",
+	temperature=0,
+	max_tokens=32,
+)
+print(response)
+
+# Chat completion
+response = client.chat.completions.create(
+    model="default",
+    messages=[
+        {"role": "system", "content": "You are a helpful AI assistant"},
+        {"role": "user", "content": "List 3 countries and their capitals."},
+    ],
+    temperature=0,
+    max_tokens=64,
+)
+print(response)
+```
+
+In above example, the server uses the chat template specified in the model tokenizer.
+You can override the chat template if needed when launching the server:
+
+```
+python -m sglang.launch_server --model-path meta-llama/Llama-2-7b-chat-hf --port 30000 --chat-template llama-2
+```
+
+If the chat template you are looking for is missing, you are welcome to contribute it.
+Meanwhile, you can also temporary register your chat template as follows:
+
+```json
+{
+  "name": "my_model",
+  "system": "<|im_start|>system",
+  "user": "<|im_start|>user",
+  "assistant": "<|im_start|>assistant",
+  "sep_style": "CHATML",
+  "sep": "<|im_end|>",
+  "stop_str": ["<|im_end|>", "<|im_start|>"]
+}
+```
+
+```
+python -m sglang.launch_server --model-path meta-llama/Llama-2-7b-chat-hf --port 30000 --chat-template ./my_model_template.json
 ```
 
 ### Additional Arguments
@@ -253,6 +324,7 @@ python -m sglang.launch_server --model-path meta-llama/Llama-2-7b-chat-hf --port
 - Mixtral
 - LLaVA
   - `python3 -m sglang.launch_server --model-path liuhaotian/llava-v1.5-7b --tokenizer-path llava-hf/llava-1.5-7b-hf --port 30000`
+- Qwen
 - AWQ quantization
 
 ## Benchmark And Performance
@@ -267,7 +339,7 @@ Learn more [here](docs/benchmark_results.md).
 
 ## Roadmap
 - [ ] Function call APIs
-- [ ] S-LoRA
+- [ ] S-LoRA (expect by Feb. 5)
 - [ ] Support more models
 - [ ] Support more hardware backends
 
@@ -282,5 +354,8 @@ Learn more [here](docs/benchmark_results.md).
       primaryClass={cs.AI}
 }
 ```
+
+[![Paper page](https://huggingface.co/datasets/huggingface/badges/resolve/main/paper-page-md.svg)](https://huggingface.co/papers/2312.07104)
+
 
 We learned from the design and reused some code of the following projects: [Guidance](https://github.com/guidance-ai/guidance), [vLLM](https://github.com/vllm-project/vllm), [LightLLM](https://github.com/ModelTC/lightllm), [FlashInfer](https://github.com/flashinfer-ai/flashinfer), [Outlines](https://github.com/outlines-dev/outlines), [LMQL](https://github.com/eth-sri/lmql).

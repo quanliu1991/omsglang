@@ -11,6 +11,7 @@ class ServerArgs:
     port: int = 30000
     load_format: str = "auto"
     tokenizer_mode: str = "auto"
+    chat_template: Optional[str] = None
     trust_remote_code: bool = True
     mem_fraction_static: Optional[float] = None
     tp_size: int = 1
@@ -22,6 +23,7 @@ class ServerArgs:
     disable_log_stats: bool = False
     log_stats_interval: int = 10
     log_level: str = "info"
+    no_regex_fast_forward: bool = False
 
     def __post_init__(self):
         if self.tokenizer_path is None:
@@ -78,6 +80,12 @@ class ServerArgs:
             "always use the slow tokenizer.",
         )
         parser.add_argument(
+            "--chat-template",
+            type=str,
+            default=ServerArgs.chat_template,
+            help="The buliltin chat template name or the path of the chat template file. This is only used for OpenAI-compatible API server",
+        )
+        parser.add_argument(
             "--trust-remote-code",
             action="store_true",
             help="Whether or not to allow for custom models defined on the Hub in their own modeling files.",
@@ -112,7 +120,7 @@ class ServerArgs:
             "--schedule-conservativeness",
             type=float,
             default=ServerArgs.schedule_conservativeness,
-            help="How conservative the schedule policy is. A larger value means more conservative scheduling. Use a larger value if you see out-of-memory errors.",
+            help="How conservative the schedule policy is. A larger value means more conservative scheduling. Use a larger value if you see requests being retracted frequently.",
         )
         parser.add_argument(
             "--random-seed",
@@ -142,6 +150,11 @@ class ServerArgs:
             type=int,
             default=ServerArgs.log_stats_interval,
             help="Log stats interval in second.",
+        )
+        parser.add_argument(
+            "--no-regex-fast-forward",
+            action="store_true",
+            help="Disable regex fast forward",
         )
 
     @classmethod

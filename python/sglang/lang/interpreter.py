@@ -48,10 +48,17 @@ def run_internal(state, program, func_args, func_kwargs, sync):
 def run_program(
     program, backend, func_args, func_kwargs, default_sampling_para, stream, sync=False
 ):
+    if hasattr(backend, "endpoint"):
+        backend = backend.endpoint
     assert backend is not None, "Please specify a backend"
     func_kwargs.update(program.bind_arguments)
     stream_executor = StreamExecutor(
-        backend, func_kwargs, default_sampling_para, chat_template=None, stream=stream
+        backend,
+        func_kwargs,
+        default_sampling_para,
+        chat_template=None,
+        stream=stream,
+        api_num_spec_tokens=program.api_num_spec_tokens,
     )
     state = ProgramState(stream_executor)
 
@@ -74,23 +81,46 @@ def run_program_batch(
     num_threads,
     progress_bar,
 ):
+    if hasattr(backend, "endpoint"):
+        backend = backend.endpoint
+
     # Extract prefix by tracing and cache it
     if len(batch_arguments) > 1:
         pin_program(program, backend)
 
     # Run all programs
     if num_threads == "auto":
-        num_threads = multiprocessing.cpu_count()
+        num_threads = max(96, multiprocessing.cpu_count() * 16)
     num_threads = min(num_threads, len(batch_arguments))
 
     if num_threads == 1:
         rets = []
-        for arguments in batch_arguments:
-            rets.append(
-                run_program(
-                    program, backend, (), arguments, default_sampling_para, False, True
+        if progress_bar:
+            for arguments in tqdm.tqdm(batch_arguments):
+                rets.append(
+                    run_program(
+                        program,
+                        backend,
+                        (),
+                        arguments,
+                        default_sampling_para,
+                        False,
+                        True,
+                    )
                 )
-            )
+        else:
+            for arguments in batch_arguments:
+                rets.append(
+                    run_program(
+                        program,
+                        backend,
+                        (),
+                        arguments,
+                        default_sampling_para,
+                        False,
+                        True,
+                    )
+                )
     else:
         if progress_bar:
             pbar = tqdm.tqdm(total=len(batch_arguments))
@@ -149,6 +179,7 @@ class StreamExecutor:
         default_sampling_para,
         chat_template,
         stream,
+        api_num_spec_tokens=None,
         use_thread=True,
     ):
         self.sid = uuid.uuid4().hex
@@ -156,9 +187,7 @@ class StreamExecutor:
         self.arguments: Dict[str, Any] = arguments
         self.default_sampling_para = default_sampling_para
         self.stream = stream
-
-        if hasattr(backend, "endpoint"):
-            self.backend = backend.endpoint
+        self.api_num_spec_tokens = api_num_spec_tokens
 
         self.variables = {}  # Dict[name: str -> value: str]
         self.variable_event = {}  # Dict[name: str -> event: threading.Event]
@@ -167,6 +196,9 @@ class StreamExecutor:
 
         # For completion
         self.text_ = ""  # The full text
+
+        # For speculative execution
+        self.speculated_text = ""
 
         # For chat
         self.messages_ = []  # The messages in the OpenAI API format
@@ -197,16 +229,7 @@ class StreamExecutor:
             self.stream_var_event = None
 
     def submit(self, expr: SglExpr):
-        if isinstance(expr, (SglGen, SglSelect, SglVarScopeBegin)):
-            self.variable_event[expr.name] = threading.Event()
-            if self.stream:
-                self.stream_var_event[expr.name] = threading.Event()
-        elif isinstance(expr, SglExprList):
-            for e in expr.expr_list:
-                if isinstance(e, (SglGen, SglSelect, SglVarScopeBegin)):
-                    self.variable_event[e.name] = threading.Event()
-                    if self.stream:
-                        self.stream_var_event[e.name] = threading.Event()
+        self._init_var_event(expr)
 
         if self.use_thread:
             self.queue.put(expr)
@@ -327,6 +350,10 @@ class StreamExecutor:
 
     def _execute_fill(self, value: str):
         value = str(value)
+        if self.speculated_text.startswith(value):
+            self.speculated_text = self.speculated_text[len(value) :]
+        else:
+            self.speculated_text = ""
         self.text_ += value
 
     def _execute_image(self, expr: SglImage):
@@ -346,9 +373,61 @@ class StreamExecutor:
         name = expr.name
 
         if not self.stream:
-            comp, meta_info = self.backend.generate(
-                self, sampling_params=sampling_params
-            )
+            if self.api_num_spec_tokens is not None:
+                stop = sampling_params.stop
+                max_new_tokens = sampling_params.max_new_tokens
+                meta_info = {}
+
+                def regen():
+                    sampling_params.max_new_tokens = max(
+                        sampling_params.max_new_tokens, self.api_num_spec_tokens
+                    )
+                    sampling_params.stop = None
+                    self.speculated_text, meta_info = self.backend.generate(
+                        self, sampling_params=sampling_params
+                    )
+
+                def find_stop():
+                    if isinstance(stop, str):
+                        return self.speculated_text.find(stop), len(stop)
+                    elif isinstance(stop, (tuple, list)):
+                        pos = -1
+                        stop_len = 0
+                        for stop_str in stop:
+                            stop_pos = self.speculated_text.find(stop_str)
+                            if stop_pos != -1 and (pos == -1 or stop_pos < pos):
+                                pos = stop_pos
+                                stop_len = len(stop_str)
+                        return pos, stop_len
+                    else:
+                        raise Exception("Wrong type of stop in sampling parameters.")
+
+                if stop is None:
+                    if len(self.speculated_text) < max_new_tokens:
+                        regen()
+                    comp = self.speculated_text[:max_new_tokens]
+                    self.speculated_text = self.speculated_text[max_new_tokens:]
+                elif isinstance(stop, (str, list, tuple)):
+                    if self.speculated_text == "":
+                        regen()
+                    stop_pos, stop_len = find_stop()
+                    if stop_pos == -1:
+                        stop_pos, stop_len = (
+                            min(
+                                sampling_params.max_new_tokens,
+                                len(self.speculated_text),
+                            ),
+                            0,
+                        )
+                    comp = self.speculated_text[:stop_pos]
+                    self.speculated_text = self.speculated_text[stop_pos:]
+                else:
+                    raise ValueError("Wrong type of stop in sampling parameters.")
+            else:
+                comp, meta_info = self.backend.generate(
+                    self, sampling_params=sampling_params
+                )
+
             self.text_ += comp
 
             self.variables[name] = comp
@@ -373,10 +452,16 @@ class StreamExecutor:
             self.stream_var_event[name].set()
 
     def _execute_select(self, expr: SglSelect):
-        decision, scores = self.backend.select(self, expr.choices, expr.temperature)
+        decision, normalized_prompt_logprob, prompt_logprob = self.backend.select(
+            self, expr.choices, expr.temperature
+        )
         if expr.name is not None:
             name = expr.name
             self.variables[name] = decision
+            self.meta_info[name] = {
+                "normalized_prompt_logprob": normalized_prompt_logprob,
+                "prompt_logprob": prompt_logprob,
+            }
             self.variable_event[name].set()
         self.text_ += decision
 
@@ -467,6 +552,15 @@ class StreamExecutor:
         src_rids = [state.stream_executor.sid for state in expr.states]
         self.backend.concatenate_and_append(src_rids, self.sid)
 
+    def _init_var_event(self, expr):
+        if isinstance(expr, (SglGen, SglSelect, SglVarScopeBegin)):
+            self.variable_event[expr.name] = threading.Event()
+            if self.stream:
+                self.stream_var_event[expr.name] = threading.Event()
+        elif isinstance(expr, SglExprList):
+            for e in expr.expr_list:
+                self._init_var_event(e)
+
     def _resolve_sampling_params(self, sampling_params):
         clone = None
         for item in [
@@ -486,6 +580,12 @@ class StreamExecutor:
                 if clone is None:
                     clone = self.default_sampling_para.clone()
                 setattr(clone, item, value)
+
+        if self.chat_template.stop_str:
+            if not clone:
+                clone = self.default_sampling_para.clone()
+            clone.stop += self.chat_template.stop_str
+
         return clone or self.default_sampling_para
 
     def __del__(self):
