@@ -4,6 +4,7 @@ import asyncio
 import dataclasses
 import json
 import multiprocessing as mp
+# mp.set_start_method('spawn')
 import sys
 import threading
 import time

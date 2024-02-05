@@ -41,17 +41,19 @@ class ServerArgs:
         parser.add_argument(
             "--model-path",
             type=str,
+            default = "/app/llm_models/omchat-llava-vicuna-7b-v1.5-v1-1-finetune_zh_n92",
             help="The path of the model weights. This can be a local folder or a Hugging Face repo ID.",
-            required=True,
+            # required=True,
         )
         parser.add_argument(
             "--tokenizer-path",
             type=str,
-            default=ServerArgs.tokenizer_path,
+            default="/app/llm_models/llava-1.5-7b-hf",#ServerArgs.tokenizer_path,
             help="The path of the tokenizer.",
         )
         parser.add_argument("--host", type=str, default=ServerArgs.host)
-        parser.add_argument("--port", type=int, default=ServerArgs.port)
+        # parser.add_argument("--port", type=int, default=ServerArgs.port)
+        parser.add_argument("--port", type=int, default=30000)
         parser.add_argument(
             "--load-format",
             type=str,

@@ -5,7 +5,8 @@ if not os.path.exists('images'):
     os.makedirs('images')
 
 # Base URL
-base_url = "https://huggingface.co/datasets/liuhaotian/llava-bench-in-the-wild/resolve/main/images/"
+# base_url = "https://huggingface.co/datasets/liuhaotian/llava-bench-in-the-wild/resolve/main/images/"
+base_url = "https://hf-mirror.com/datasets/liuhaotian/llava-bench-in-the-wild/resolve/main/images/"
 
 # Loop through image numbers
 for i in range(1, 25):
