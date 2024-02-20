@@ -168,7 +168,6 @@ class TokenizerManager:
             bs = len(obj.text)
             for i in range(bs):
                 rid = obj.rid[i]
-                # todo 输入 input ids
                 input_ids = self.tokenizer.encode(obj.text[i])
                 sampling_params = SamplingParams(**obj.sampling_params[i])
                 if sampling_params.max_new_tokens != 0:
@@ -180,7 +179,16 @@ class TokenizerManager:
                     pixel_values, image_hash = await self.get_pixel_values(
                         obj.image_data[i]
                     )
-                print(sampling_params.fixed_length)
+                if pixel_values is not None:
+                    image_tokens_len = (pixel_values.shape[1] / 14) ** 2
+                else:
+                    image_tokens_len = 0
+                input_token_len = sampling_params.fixed_length[0]
+                if (len(input_ids) + image_tokens_len) >= input_token_len:
+                    input_ids = input_ids[:int(input_token_len - image_tokens_len)]
+                else:
+                    input_ids.extend([input_ids[0]] * int(input_token_len - image_tokens_len - len(input_ids) + 1))
+
                 tokenized_obj = TokenizedGenerateReqInput(
                     rid=rid,
                     input_ids=input_ids,
