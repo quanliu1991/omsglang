@@ -27,6 +27,7 @@ class SglSamplingParams:
     # for constrained generation, not included in to_xxx_kwargs
     dtype: Optional[str] = None
     regex: Optional[str] = None
+    fixed_length: Optional[tuple] = (None,None)
 
     def clone(self):
         return SglSamplingParams(
@@ -91,6 +92,7 @@ class SglSamplingParams:
             "presence_penalty": self.presence_penalty,
             "ignore_eos": self.ignore_eos,
             "regex": self.regex,
+            "fixed_length": self.fixed_length,
         }
 
 
@@ -124,6 +126,7 @@ class SglFunction:
         ignore_eos: bool = False,
         stream: bool = False,
         backend=None,
+        fixed_length: Optional[tuple] = (None,None),
         **kwargs,
     ):
         from sglang.lang.interpreter import run_program
@@ -137,6 +140,7 @@ class SglFunction:
             frequency_penalty=frequency_penalty,
             presence_penalty=presence_penalty,
             ignore_eos=ignore_eos,
+            fixed_length=fixed_length,
         )
         backend = backend or global_config.default_backend
         return run_program(self, backend, args, kwargs, default_sampling_para, stream)
@@ -154,6 +158,7 @@ class SglFunction:
         presence_penalty: float = 0.0,
         ignore_eos: bool = False,
         backend=None,
+        fixed_length: Optional[tuple] = (None, None),
         num_threads: Union[str, int] = "auto",
         progress_bar: bool = False,
     ):
@@ -173,6 +178,7 @@ class SglFunction:
             frequency_penalty=frequency_penalty,
             presence_penalty=presence_penalty,
             ignore_eos=ignore_eos,
+            fixed_length=fixed_length,
         )
         backend = backend or global_config.default_backend
         return run_program_batch(
@@ -347,6 +353,7 @@ class SglGen(SglExpr):
         ignore_eos,
         dtype,
         regex,
+        fixed_length,
     ):
         super().__init__()
         self.name = name
@@ -361,6 +368,7 @@ class SglGen(SglExpr):
             ignore_eos=ignore_eos,
             dtype=dtype,
             regex=regex,
+            fixed_length=fixed_length,
         )
 
     def __repr__(self):

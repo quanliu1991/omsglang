@@ -480,6 +480,7 @@ class StreamExecutor:
             "ignore_eos",
             "dtype",
             "regex",
+            "fixed_length",
         ]:
             value = getattr(sampling_params, item, None)
             if value is not None:
