@@ -106,9 +106,14 @@ def http_request(url, json=None, stream=False):
 def encode_image_base64(image_path):
     """Encode an image in base64."""
     if isinstance(image_path, str):
-        with open(image_path, "rb") as image_file:
-            data = image_file.read()
-            return base64.b64encode(data).decode("utf-8")
+        if image_path.startswith("http://") or image_path.startswith("https://"):
+            response = requests.get(image_path, timeout=10)
+            return base64.b64encode(response.content).decode("utf-8")
+            # image = Image.open(BytesIO(response.content)).convert('RGB')
+        else:
+            with open(image_path, "rb") as image_file:
+                data = image_file.read()
+                return base64.b64encode(data).decode("utf-8")
     elif isinstance(image_path, bytes):
         return base64.b64encode(image_path).decode("utf-8")
     else:
