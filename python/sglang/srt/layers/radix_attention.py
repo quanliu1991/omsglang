@@ -13,16 +13,8 @@ from vllm.model_executor.parallel_utils.parallel_state import (
 
 
 class RadixAttention(nn.Module):
-    def __init__(
-        self,
-        num_heads,
-        head_dim,
-        scaling,
-        num_kv_heads,
-        layer_id,
-    ):
+    def __init__(self, num_heads, head_dim, scaling, num_kv_heads, layer_id):
         super().__init__()
-
         self.tp_q_head_num = num_heads
         self.tp_k_head_num = num_kv_heads
         self.tp_v_head_num = num_kv_heads
@@ -61,7 +53,6 @@ class RadixAttention(nn.Module):
     def extend_forward_triton(self, q, k, v, input_metadata: InputMetadata):
         o = torch.empty_like(q)
         self.store_kv_cache(k, v, input_metadata)
-
         extend_attention_fwd(
             q.view(-1, self.tp_q_head_num, self.head_dim),
             k.contiguous(),
@@ -107,12 +98,7 @@ class RadixAttention(nn.Module):
 
         o = input_metadata.prefill_wrapper.forward(
             q.contiguous().view(-1, self.tp_q_head_num, self.head_dim),
-            input_metadata.qo_indptr,
             input_metadata.token_to_kv_pool.kv_data[self.layer_id],
-            input_metadata.kv_indptr,
-            input_metadata.kv_indices,
-            input_metadata.kv_last_page_len,
-            allow_fp16_qk_reduction=True,
         )
 
         return o.view(-1, self.tp_q_head_num * self.head_dim)
@@ -123,9 +109,6 @@ class RadixAttention(nn.Module):
         o = input_metadata.decode_wrapper.forward(
             q.contiguous().view(-1, self.tp_q_head_num, self.head_dim),
             input_metadata.token_to_kv_pool.kv_data[self.layer_id],
-            input_metadata.kv_indptr,
-            input_metadata.kv_indices,
-            input_metadata.kv_last_page_len,
         )
 
         return o.view(-1, self.tp_q_head_num * self.head_dim)

@@ -1,41 +1,13 @@
-import threading
-
-from sglang.srt.constrained.fsm import RegexFSM
-from sglang.srt.constrained.tokenizer import TransformerTokenizer
+from sglang.srt.constrained import RegexFSM, TransformerTokenizer
+from sglang.srt.constrained.base_cache import BaseCache
 
 
-def get_fsm(regex, tokenizer, fsm_cache_entry):
-    outlines_tokenizer = TransformerTokenizer(tokenizer)
-    fsm = RegexFSM(regex, outlines_tokenizer)
-    fsm_cache_entry.fsm = fsm
-    fsm_cache_entry.event.set()
+class FSMCache(BaseCache):
+    def __init__(self, tokenizer_path, tokenizer_args_dict, enable=True):
+        super().__init__(enable=enable)
+        self.outlines_tokenizer = TransformerTokenizer(
+            tokenizer_path, **tokenizer_args_dict
+        )
 
-
-class FSMCacheEntry:
-    def __init__(self):
-        self.fsm = None
-        self.event = threading.Event()
-
-
-class FSMCache:
-    def __init__(self, tokenizer):
-        self.cache = {}
-        self.tokenizer = tokenizer
-
-    def init_fsm_in_background(self, regex):
-        if regex not in self.cache:
-            self.cache[regex] = FSMCacheEntry()
-            threading.Thread(
-                target=get_fsm,
-                args=(
-                    regex,
-                    self.tokenizer,
-                    self.cache[regex],
-                ),
-            ).start()
-
-    def get_fsm(self, regex):
-        self.init_fsm_in_background(regex)
-        entry = self.cache[regex]
-        entry.event.wait()
-        return entry.fsm
+    def init_value(self, regex):
+        return RegexFSM(regex, self.outlines_tokenizer)

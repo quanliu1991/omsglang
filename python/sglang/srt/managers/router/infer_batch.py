@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from enum import Enum, auto
 from typing import List
 
@@ -20,15 +21,28 @@ class FinishReason(Enum):
 
 
 class Req:
-    def __init__(self, rid):
+    def __init__(self, rid, input_text, input_ids):
         self.rid = rid
-        self.input_ids = []
+        self.input_text = input_text
+        self.input_ids = input_ids
         self.output_ids = []
+
+        # Since jump forward may retokenize the prompt with partial outputs,
+        # we maintain the original prompt length to report the correct usage.
+        self.prompt_tokens = len(input_ids)
+        # The number of decoded tokens for token usage report. Note that
+        # this does not include the jump forward tokens.
+        self.completion_tokens_wo_jump_forward = 0
+
+        # For vision input
         self.pixel_values = None
+        self.image_size = None
         self.image_offset = 0
+        self.pad_value = None
+
         self.sampling_params = None
-        self.return_normalized_logprob = False
-        self.normalized_logprob_start_len = 0
+        self.return_logprob = False
+        self.logprob_start_len = 0
         self.stream = False
 
         self.tokenizer = None
@@ -36,17 +50,65 @@ class Req:
         self.finish_reason = None
         self.hit_stop_str = None
 
-        self.adjust_input_len = 0
+        self.extend_input_len = 0
         self.prefix_indices = []
+        self.last_node = None
 
+        self.logprob = None
+        self.token_logprob = None
         self.normalized_logprob = None
 
-        # for constrained decoding
+        # For constrained decoding
         self.regex_fsm = None
-        self.regex_fsm_state = None
+        self.regex_fsm_state = 0
+        self.jump_forward_map = None
+        self.output_and_jump_forward_str = ""
 
     def max_new_tokens(self):
         return self.sampling_params.max_new_tokens
+
+    def jump_forward_and_retokenize(self, jump_forward_str, next_state):
+        old_output_str = self.tokenizer.decode(self.output_ids)
+        # FIXME: This logic does not really solve the problem of determining whether
+        # there should be a leading space.
+        first_token = self.tokenizer.convert_ids_to_tokens(self.output_ids[0])
+        first_token = (
+            first_token.decode() if isinstance(first_token, bytes) else first_token
+        )
+        if first_token.startswith("▁"):
+            old_output_str = " " + old_output_str
+        new_input_string = (
+            self.input_text
+            + self.output_and_jump_forward_str
+            + old_output_str
+            + jump_forward_str
+        )
+        new_input_ids = self.tokenizer.encode(new_input_string)
+        if self.pixel_values is not None:
+            # NOTE: This is a hack because the old input_ids contains the image padding
+            jump_forward_tokens_len = len(self.tokenizer.encode(jump_forward_str))
+        else:
+            jump_forward_tokens_len = (
+                len(new_input_ids) - len(self.input_ids) - len(self.output_ids)
+            )
+
+        # print("=" * 100)
+        # print(f"Catch jump forward:\n{jump_forward_str}")
+        # print(self.tokenizer.convert_ids_to_tokens(self.input_ids))
+        # print(self.tokenizer.convert_ids_to_tokens(new_input_ids))
+
+        self.input_ids = new_input_ids
+        self.output_ids = []
+        self.sampling_params.max_new_tokens = max(
+            self.sampling_params.max_new_tokens - jump_forward_tokens_len, 0
+        )
+        self.regex_fsm_state = next_state
+        self.output_and_jump_forward_str = (
+            self.output_and_jump_forward_str + old_output_str + jump_forward_str
+        )
+
+        # print(f"Output and jump forward str:\n{self.output_and_jump_forward_str}")
+        # print("*" * 100)
 
     def check_finished(self):
         if self.finished:
@@ -81,27 +143,57 @@ class Req:
         return f"rid(n={self.rid}, " f"input_ids={self.input_ids}, "
 
 
+@dataclass
 class Batch:
-    def __init__(
-        self,
-        reqs: List[Req],
-        req_to_token_pool: ReqToTokenPool,
-        token_to_kv_pool: TokenToKVPool,
-        tree_cache: RadixCache,
-    ):
-        self.reqs = reqs
-        self.req_to_token_pool = req_to_token_pool
-        self.token_to_kv_pool = token_to_kv_pool
-        self.tree_cache = tree_cache
+    reqs: List[Req]
+    req_to_token_pool: ReqToTokenPool
+    token_to_kv_pool: TokenToKVPool
+    tree_cache: RadixCache
 
-        self.return_normalized_logprob = any(
-            req.return_normalized_logprob for req in reqs
+    # batched arguments to model runner
+    input_ids: torch.Tensor = None
+    req_pool_indices: torch.Tensor = None
+    seq_lens: torch.Tensor = None
+    prefix_lens: torch.Tensor = None
+    position_ids_offsets: torch.Tensor = None
+    out_cache_loc: torch.Tensor = None
+    out_cache_cont_start: torch.Tensor = None
+    out_cache_cont_end: torch.Tensor = None
+    return_logprob: bool = False
+
+    # for multimodal
+    pixel_values: List[torch.Tensor] = None
+    image_sizes: List[List[int]] = None
+    image_offsets: List[int] = None
+
+    # other arguments for control
+    output_ids: torch.Tensor = None
+    extend_num_tokens: int = None
+
+    # batched sampling params
+    temperatures: torch.Tensor = None
+    top_ps: torch.Tensor = None
+    top_ks: torch.Tensor = None
+    frequency_penalties: torch.Tensor = None
+    presence_penalties: torch.Tensor = None
+    logit_bias: torch.Tensor = None
+
+    @classmethod
+    def init_new(cls, reqs, req_to_token_pool, token_to_kv_pool, tree_cache):
+        return_logprob = any(req.return_logprob for req in reqs)
+
+        return cls(
+            reqs=reqs,
+            req_to_token_pool=req_to_token_pool,
+            token_to_kv_pool=token_to_kv_pool,
+            tree_cache=tree_cache,
+            return_logprob=return_logprob,
         )
 
     def is_empty(self):
         return len(self.reqs) == 0
 
-    def init_extend_batch(self, vocab_size: int, int_token_logit_bias: torch.Tensor):
+    def prepare_for_extend(self, vocab_size: int, int_token_logit_bias: torch.Tensor):
         device = "cuda"
         bs = len(self.reqs)
         reqs = self.reqs
@@ -137,11 +229,12 @@ class Batch:
         extend_num_tokens = seq_lens.sum() - prefix_lens.sum()
         out_cache_loc = self.token_to_kv_pool.alloc(extend_num_tokens)
         if out_cache_loc is None:
-            self.tree_cache.evict(extend_num_tokens, self.token_to_kv_pool.free)
-            out_cache_loc = self.token_to_kv_pool.alloc(extend_num_tokens)
+            if not self.tree_cache.disable:
+                self.tree_cache.evict(extend_num_tokens, self.token_to_kv_pool.free)
+                out_cache_loc = self.token_to_kv_pool.alloc(extend_num_tokens)
 
             if out_cache_loc is None:
-                print("Prefill out of memory.")
+                print("Prefill out of memory. This should nerver happen.")
                 self.tree_cache.pretty_print()
                 exit()
 
@@ -163,6 +256,7 @@ class Batch:
             flatten_input_ids, dtype=torch.int32, device=device
         )
         self.pixel_values = [r.pixel_values for r in reqs]
+        self.image_sizes = [r.image_size for r in reqs]
         self.image_offsets = [
             r.image_offset - p_len for r, p_len in zip(reqs, prefix_lens)
         ]
@@ -196,7 +290,92 @@ class Batch:
         )
         self.logit_bias = logit_bias
 
-    def update_for_decode(self, input_ids=None):
+    def check_decode_mem(self):
+        bs = len(self.reqs)
+        if self.token_to_kv_pool.available_size() >= bs:
+            return True
+
+        if not self.tree_cache.disable:
+            self.tree_cache.evict(bs, self.token_to_kv_pool.free)
+        if self.token_to_kv_pool.available_size() >= bs:
+            return True
+
+        return False
+
+    def retract_decode(self):
+        sorted_indices = [i for i in range(len(self.reqs))]
+        sorted_indices.sort(
+            key=lambda i: (len(self.reqs[i].output_ids), -len(self.reqs[i].input_ids)),
+            reverse=True,
+        )
+
+        retracted_reqs = []
+        seq_lens_np = self.seq_lens.cpu().numpy()
+        req_pool_indices_np = self.req_pool_indices.cpu().numpy()
+        while self.token_to_kv_pool.available_size() < len(self.reqs):
+            idx = sorted_indices.pop()
+            req = self.reqs[idx]
+            retracted_reqs.append(req)
+
+            self.tree_cache.dec_ref_counter(req.last_node)
+            req.prefix_indices = None
+            req.last_node = None
+            req.extend_input_len = 0
+            req.output_ids = []
+            req.regex_fsm_state = 0
+
+            # TODO: apply more fine-grained retraction
+
+            token_indices = self.req_to_token_pool.req_to_token[
+                req_pool_indices_np[idx]
+            ][: seq_lens_np[idx]]
+            self.token_to_kv_pool.free(token_indices)
+
+        self.filter_batch(sorted_indices)
+
+        return retracted_reqs
+
+    def check_for_jump_forward(self):
+        jump_forward_reqs = []
+        filter_indices = [i for i in range(len(self.reqs))]
+
+        req_pool_indices_cpu = None
+
+        for i, req in enumerate(self.reqs):
+            if req.jump_forward_map is not None:
+                res = req.jump_forward_map.jump_forward(req.regex_fsm_state)
+                if res is not None:
+                    jump_forward_str, next_state = res
+                    if len(jump_forward_str) <= 1:
+                        continue
+
+                    # insert the old request into tree_cache
+                    token_ids_in_memory = tuple(req.input_ids + req.output_ids)[:-1]
+                    if req_pool_indices_cpu is None:
+                        req_pool_indices_cpu = self.req_pool_indices.cpu().tolist()
+                    req_pool_idx = req_pool_indices_cpu[i]
+                    indices = self.req_to_token_pool.req_to_token[
+                        req_pool_idx, : len(token_ids_in_memory)
+                    ]
+                    prefix_len = self.tree_cache.insert(
+                        token_ids_in_memory, indices.clone()
+                    )
+                    self.token_to_kv_pool.free(indices[:prefix_len])
+                    self.req_to_token_pool.free(req_pool_idx)
+                    self.tree_cache.dec_ref_counter(req.last_node)
+
+                    # jump-forward
+                    req.jump_forward_and_retokenize(jump_forward_str, next_state)
+
+                    jump_forward_reqs.append(req)
+                    filter_indices.remove(i)
+
+        if len(filter_indices) < len(self.reqs):
+            self.filter_batch(filter_indices)
+
+        return jump_forward_reqs
+
+    def prepare_for_decode(self, input_ids=None):
         if input_ids is None:
             input_ids = [
                 r.output_ids[-1] if r.output_ids else r.input_ids[-1] for r in self.reqs
@@ -212,13 +391,9 @@ class Batch:
             self.out_cache_loc = self.token_to_kv_pool.alloc(bs)
 
             if self.out_cache_loc is None:
-                self.tree_cache.evict(bs, self.token_to_kv_pool.free)
-                self.out_cache_loc = self.token_to_kv_pool.alloc(bs)
-
-                if self.out_cache_loc is None:
-                    print("Decode out of memory.")
-                    self.tree_cache.pretty_print()
-                    exit()
+                print("Decode out of memory. This should nerver happen.")
+                self.tree_cache.pretty_print()
+                exit()
 
             self.out_cache_cont_start = None
             self.out_cache_cont_end = None
@@ -240,6 +415,7 @@ class Batch:
         self.prefix_lens = None
         self.position_ids_offsets = self.position_ids_offsets[new_indices]
         self.out_cache_loc = self.out_cache_cont_start = self.out_cache_cont_end = None
+        self.return_logprob = any(req.return_logprob for req in self.reqs)
 
         for item in [
             "temperatures",
@@ -263,6 +439,7 @@ class Batch:
             [self.position_ids_offsets, other.position_ids_offsets]
         )
         self.out_cache_loc = self.out_cache_cont_start = self.out_cache_cont_end = None
+        self.return_logprob = any(req.return_logprob for req in self.reqs)
 
         for item in [
             "temperatures",

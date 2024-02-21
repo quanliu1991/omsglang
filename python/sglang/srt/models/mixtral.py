@@ -97,14 +97,16 @@ class MixtralMoE(nn.Module):
 
         self.experts = nn.ModuleList(
             [
-                MixtralMLP(
-                    self.num_total_experts,
-                    config.hidden_size,
-                    config.intermediate_size,
-                    linear_method=linear_method,
+                (
+                    MixtralMLP(
+                        self.num_total_experts,
+                        config.hidden_size,
+                        config.intermediate_size,
+                        linear_method=linear_method,
+                    )
+                    if idx in self.expert_indicies
+                    else None
                 )
-                if idx in self.expert_indicies
-                else None
                 for idx in range(self.num_total_experts)
             ]
         )
@@ -351,7 +353,11 @@ class MixtralForCausalLM(nn.Module):
 
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in hf_model_weights_iterator(
-            model_name_or_path, cache_dir, load_format, revision
+            model_name_or_path,
+            cache_dir,
+            load_format,
+            revision,
+            fall_back_to_pt=False,
         ):
             if "rotary_emb.inv_freq" in name:
                 continue
@@ -376,3 +382,6 @@ class MixtralForCausalLM(nn.Module):
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
+
+
+EntryClass = MixtralForCausalLM

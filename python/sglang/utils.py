@@ -22,7 +22,7 @@ def get_available_gpu_memory(gpu_id, distributed=True):
 
     if torch.cuda.current_device() != gpu_id:
         print(
-            f"WARN: current device is not {gpu_id}, but {torch.cuda.current_device()}, ",
+            f"WARNING: current device is not {gpu_id}, but {torch.cuda.current_device()}, ",
             "which may cause useless memory allocation for torch CUDA context.",
         )
 
@@ -88,13 +88,21 @@ class HttpResponse:
         return self.resp.status
 
 
-def http_request(url, json=None, stream=False):
+def http_request(url, json=None, stream=False, auth_token=None):
     """A faster version of requests.post with low-level urllib API."""
     if stream:
-        return requests.post(url, json=json, stream=True)
+        if auth_token is None:
+            return requests.post(url, json=json, stream=True)
+        headers = {
+            "Content-Type": "application/json",
+            "Authentication": f"Bearer {auth_token}",
+        }
+        return requests.post(url, json=json, stream=True, headers=headers)
     else:
         req = urllib.request.Request(url)
         req.add_header("Content-Type", "application/json; charset=utf-8")
+        if auth_token is not None:
+            req.add_header("Authentication", f"Bearer {auth_token}")
         if json is None:
             data = None
         else:
@@ -159,6 +167,9 @@ def find_printable_text(text):
     # If the last token is a CJK character, we print the characters.
     elif len(text) > 0 and _is_chinese_char(ord(text[-1])):
         return text
+    # Otherwise if the penultimate token is a CJK character, we print the characters except for the last one.
+    elif len(text) > 1 and _is_chinese_char(ord(text[-2])):
+        return text[:-1]
     # Otherwise, prints until the last space char (simple heuristic to avoid printing incomplete words,
     # which may change with the subsequent token -- there are probably smarter ways to do this!)
     else:

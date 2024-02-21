@@ -6,6 +6,7 @@ import sys
 import time
 import traceback
 from io import BytesIO
+from typing import List, Optional
 
 import numpy as np
 import requests
@@ -99,6 +100,47 @@ def alloc_usable_network_port(num, used_list=()):
     return None
 
 
+def check_port(port):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        try:
+            s.bind(("", port))
+            return True
+        except socket.error:
+            return False
+
+
+def handle_port_init(
+    port: Optional[int] = None,
+    additional_ports: Optional[List[int]] = None,
+    tp_size: int = 1,
+):
+    port = 30000 if port is None else port
+    additional_ports = [] if additional_ports is None else additional_ports
+    additional_ports = (
+        [additional_ports] if isinstance(additional_ports, int) else additional_ports
+    )
+    # first check on server port
+    if not check_port(port):
+        new_port = alloc_usable_network_port(1, used_list=[port])[0]
+        print(f"WARNING: Port {port} is not available. Use {new_port} instead.")
+        port = new_port
+
+    # then we check on additional ports
+    additional_unique_ports = set(additional_ports) - {port}
+    # filter out ports that are already in use
+    can_use_ports = [port for port in additional_unique_ports if check_port(port)]
+
+    num_specified_ports = len(can_use_ports)
+    if num_specified_ports < 4 + tp_size:
+        addtional_can_use_ports = alloc_usable_network_port(
+            num=4 + tp_size - num_specified_ports, used_list=can_use_ports + [port]
+        )
+        can_use_ports.extend(addtional_can_use_ports)
+
+    additional_ports = can_use_ports[: 4 + tp_size]
+    return port, additional_ports
+
+
 def get_exception_traceback():
     etype, value, tb = sys.exc_info()
     err_str = "".join(traceback.format_exception(etype, value, tb))
@@ -108,13 +150,13 @@ def get_exception_traceback():
 def get_int_token_logit_bias(tokenizer, vocab_size):
     from transformers import LlamaTokenizer, LlamaTokenizerFast
 
+    # a bug when model's vocab size > tokenizer.vocab_size
+    vocab_size = tokenizer.vocab_size
     logit_bias = np.zeros(vocab_size, dtype=np.float32)
     for t_id in range(vocab_size):
-        ss = tokenizer.decode(t_id).strip()
+        ss = tokenizer.decode([t_id]).strip()
         if not (ss.isdigit() or len(ss) == 0 or t_id == tokenizer.eos_token_id):
             logit_bias[t_id] = -1e5
-        # else:
-        #    print(ss, t_id)
 
     return logit_bias
 
@@ -189,11 +231,12 @@ def wrap_kernel_launcher(kernel):
 
 def is_multimodal_model(model):
     if isinstance(model, str):
-        return "llava" in model
+        return "llava" in model or "yi-vl" in model
     from sglang.srt.model_config import ModelConfig
 
     if isinstance(model, ModelConfig):
-        return "llava" in model.path.lower()
+        model_path = model.path.lower()
+        return "llava" in model_path or "yi-vl" in model_path
     raise Exception("unrecognized type")
 
 

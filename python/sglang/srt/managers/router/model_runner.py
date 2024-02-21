@@ -1,5 +1,8 @@
+import importlib
+import logging
 from dataclasses import dataclass
-from enum import Enum, auto
+from functools import lru_cache
+from pathlib import Path
 from typing import List
 
 import numpy as np
@@ -9,11 +12,45 @@ from sglang.srt.memory_pool import ReqToTokenPool, TokenToKVPool
 from sglang.srt.utils import is_multimodal_model
 from sglang.utils import get_available_gpu_memory
 from vllm.model_executor.layers.quantization.awq import AWQConfig
+from vllm.model_executor.layers.quantization.gptq import GPTQConfig
 from vllm.model_executor.model_loader import _set_default_torch_dtype
 from vllm.model_executor.parallel_utils.parallel_state import initialize_model_parallel
 
+import sglang
+
+QUANTIONCONFIG_MAPPING = {"awq": AWQConfig, "gptq": GPTQConfig}
+
+logger = logging.getLogger("model_runner")
+
+
 # for model_mode
 global_model_mode: List[str] = []
+
+
+@lru_cache()
+def import_model_classes():
+    model_arch_name_to_cls = {}
+    for module_path in (Path(sglang.__file__).parent / "srt" / "models").glob("*.py"):
+        module = importlib.import_module(f"sglang.srt.models.{module_path.stem}")
+        if hasattr(module, "EntryClass"):
+            model_arch_name_to_cls[module.EntryClass.__name__] = module.EntryClass
+    return model_arch_name_to_cls
+
+
+def get_model_cls_by_arch_name(model_arch_names):
+    model_arch_name_to_cls = import_model_classes()
+
+    model_class = None
+    for arch in model_arch_names:
+        if arch in model_arch_name_to_cls:
+            model_class = model_arch_name_to_cls[arch]
+            break
+    else:
+        raise ValueError(
+            f"Unsupported architectures: {arch}. "
+            f"Supported list: {list(model_arch_name_to_cls.keys())}"
+        )
+    return model_class
 
 
 @dataclass
@@ -41,7 +78,7 @@ class InputMetadata:
     out_cache_cont_end: torch.Tensor = None
 
     other_kv_index: torch.Tensor = None
-    return_normalized_logprob: bool = False
+    return_logprob: bool = False
 
     # for flashinfer
     use_flashinfer: bool = False
@@ -53,6 +90,11 @@ class InputMetadata:
     decode_wrapper = None
 
     def init_flashinfer_args(self, tp_size):
+        from flashinfer import (
+            BatchDecodeWithPagedKVCacheWrapper,
+            BatchPrefillWithPagedKVCacheWrapper,
+        )
+
         self.kv_indptr = torch.zeros(
             (self.batch_size + 1,), dtype=torch.int32, device="cuda"
         )
@@ -70,11 +112,9 @@ class InputMetadata:
             (self.batch_size,), dtype=torch.int32, device="cuda"
         )
 
-        from flashinfer.ops import (
-            BatchDecodeWithPagedKVCacheWrapper,
-            BatchPrefillWithPagedKVCacheWrapper,
+        workspace_buffer = torch.empty(
+            32 * 1024 * 1024, dtype=torch.int8, device="cuda"
         )
-
         if (
             self.forward_mode == ForwardMode.PREFILL
             or self.forward_mode == ForwardMode.EXTEND
@@ -83,19 +123,25 @@ class InputMetadata:
                 (self.batch_size + 1,), dtype=torch.int32, device="cuda"
             )
             self.qo_indptr[1:] = torch.cumsum(self.extend_seq_lens, dim=0)
-            self.prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper()
+            self.prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
+                workspace_buffer, "NHD"
+            )
             self.prefill_wrapper.begin_forward(
                 self.qo_indptr,
-                self.batch_size,
+                self.kv_indptr,
+                self.kv_indices,
+                self.kv_last_page_len,
                 self.model_runner.model_config.num_attention_heads // tp_size,
                 self.model_runner.model_config.num_key_value_heads // tp_size,
             )
         else:
-            self.decode_wrapper = BatchDecodeWithPagedKVCacheWrapper()
+            self.decode_wrapper = BatchDecodeWithPagedKVCacheWrapper(
+                workspace_buffer, "NHD"
+            )
             self.decode_wrapper.begin_forward(
                 self.kv_indptr,
+                self.kv_indices,
                 self.kv_last_page_len,
-                self.batch_size,
                 self.model_runner.model_config.num_attention_heads // tp_size,
                 self.model_runner.model_config.num_key_value_heads // tp_size,
                 self.model_runner.model_config.head_dim,
@@ -107,7 +153,7 @@ class InputMetadata:
     def init_extend_args(self):
         self.extend_seq_lens = self.seq_lens - self.prefix_lens
         self.extend_start_loc = torch.zeros_like(self.seq_lens)
-        self.extend_start_loc[1:] = torch.cumsum(self.extend_seq_lens[:-1], 0)
+        self.extend_start_loc[1:] = torch.cumsum(self.extend_seq_lens[:-1], dim=0)
         self.max_extend_len = int(torch.max(self.extend_seq_lens))
 
     @classmethod
@@ -123,7 +169,7 @@ class InputMetadata:
         out_cache_loc,
         out_cache_cont_start=None,
         out_cache_cont_end=None,
-        return_normalized_logprob=False,
+        return_logprob=False,
     ):
         batch_size = len(req_pool_indices)
         start_loc = torch.zeros((batch_size,), dtype=torch.int32, device="cuda")
@@ -171,7 +217,7 @@ class InputMetadata:
             out_cache_loc=out_cache_loc,
             out_cache_cont_start=out_cache_cont_start,
             out_cache_cont_end=out_cache_cont_end,
-            return_normalized_logprob=return_normalized_logprob,
+            return_logprob=return_logprob,
             other_kv_index=other_kv_index,
         )
 
@@ -233,29 +279,10 @@ class ModelRunner:
 
     def load_model(self):
         """See also vllm/model_executor/model_loader.py::get_model"""
-        from sglang.srt.models.llama2 import LlamaForCausalLM
-        from sglang.srt.models.llava import LlavaLlamaForCausalLM
-        from sglang.srt.models.mixtral import MixtralForCausalLM
-
         # Select model class
         architectures = getattr(self.model_config.hf_config, "architectures", [])
-
-        model_class = None
-        for arch in architectures:
-            if arch == "LlamaForCausalLM":
-                model_class = LlamaForCausalLM
-                break
-            if arch == "MistralForCausalLM":
-                model_class = LlamaForCausalLM
-                break
-            if arch == "LlavaLlamaForCausalLM":
-                model_class = LlavaLlamaForCausalLM
-                break
-            if arch == "MixtralForCausalLM":
-                model_class = MixtralForCausalLM
-                break
-        if model_class is None:
-            raise ValueError(f"Unsupported architectures: {architectures}")
+        model_class = get_model_cls_by_arch_name(architectures)
+        logger.info(f"Rank {self.tp_rank}: load weight begin.")
 
         # Load weights
         linear_method = None
@@ -265,9 +292,15 @@ class ModelRunner:
                     self.model_config.hf_config, "quantization_config", None
                 )
                 if hf_quant_config is not None:
-                    # TODO: config quantization awq etc
-                    quant_config = AWQConfig.from_config(hf_quant_config)
-                    print(f"quant_config: {quant_config}")
+                    quant_config_class = QUANTIONCONFIG_MAPPING.get(
+                        hf_quant_config["quant_method"]
+                    )
+                    if quant_config_class is None:
+                        raise ValueError(
+                            f"Unsupported quantization method: {hf_quant_config['quant_method']}"
+                        )
+                    quant_config = quant_config_class.from_config(hf_quant_config)
+                    logger.info(f"quant_config: {quant_config}")
                     linear_method = quant_config.get_linear_method()
                 model = model_class(
                     config=self.model_config.hf_config, linear_method=linear_method
@@ -279,6 +312,8 @@ class ModelRunner:
                 revision=None,
             )
         self.model = model.eval()
+
+        logger.info(f"Rank {self.tp_rank}: load weight end.")
 
     def profile_max_num_token(self, total_gpu_memory):
         available_gpu_memory = get_available_gpu_memory(
@@ -297,6 +332,12 @@ class ModelRunner:
 
     def init_memory_pool(self, total_gpu_memory):
         self.max_total_num_token = self.profile_max_num_token(total_gpu_memory)
+
+        if self.max_total_num_token <= 0:
+            raise RuntimeError(
+                "Not enought memory. " "Please try to increase --mem-fraction-static."
+            )
+
         self.req_to_token_pool = ReqToTokenPool(
             int(self.max_total_num_token / self.model_config.context_len * 256),
             self.model_config.context_len + 8,
@@ -319,7 +360,7 @@ class ModelRunner:
         prefix_lens,
         position_ids_offsets,
         out_cache_loc,
-        return_normalized_logprob,
+        return_logprob,
     ):
         input_metadata = InputMetadata.create(
             self,
@@ -330,7 +371,7 @@ class ModelRunner:
             prefix_lens=prefix_lens,
             position_ids_offsets=position_ids_offsets,
             out_cache_loc=out_cache_loc,
-            return_normalized_logprob=return_normalized_logprob,
+            return_logprob=return_logprob,
         )
         return self.model.forward(input_ids, input_metadata.positions, input_metadata)
 
@@ -343,7 +384,7 @@ class ModelRunner:
         prefix_lens,
         position_ids_offsets,
         out_cache_loc,
-        return_normalized_logprob,
+        return_logprob,
     ):
         input_metadata = InputMetadata.create(
             self,
@@ -354,7 +395,7 @@ class ModelRunner:
             prefix_lens=prefix_lens,
             position_ids_offsets=position_ids_offsets,
             out_cache_loc=out_cache_loc,
-            return_normalized_logprob=return_normalized_logprob,
+            return_logprob=return_logprob,
         )
         return self.model.forward(input_ids, input_metadata.positions, input_metadata)
 
@@ -369,6 +410,7 @@ class ModelRunner:
         out_cache_loc,
         out_cache_cont_start,
         out_cache_cont_end,
+        return_logprob,
     ):
         input_metadata = InputMetadata.create(
             self,
@@ -381,23 +423,23 @@ class ModelRunner:
             out_cache_loc=out_cache_loc,
             out_cache_cont_start=out_cache_cont_start,
             out_cache_cont_end=out_cache_cont_end,
+            return_logprob=return_logprob,
         )
-        return self.model.forward(input_ids, input_metadata.positions, input_metadata)[
-            0
-        ]
+        return self.model.forward(input_ids, input_metadata.positions, input_metadata)
 
     @torch.inference_mode()
     def forward_extend_multi_modal(
         self,
         input_ids,
         pixel_values,
+        image_sizes,
         image_offsets,
         req_pool_indices,
         seq_lens,
         prefix_lens,
         position_ids_offsets,
         out_cache_loc,
-        return_normalized_logprob,
+        return_logprob,
     ):
         input_metadata = InputMetadata.create(
             self,
@@ -408,31 +450,31 @@ class ModelRunner:
             prefix_lens=prefix_lens,
             position_ids_offsets=position_ids_offsets,
             out_cache_loc=out_cache_loc,
-            return_normalized_logprob=return_normalized_logprob,
+            return_logprob=return_logprob,
         )
         return self.model.forward(
             input_ids,
             input_metadata.positions,
             input_metadata,
             pixel_values,
+            image_sizes,
             image_offsets,
         )
 
-    def forward(
-        self, batch: Batch, forward_mode: ForwardMode, return_normalized_logprob=False
-    ):
+    def forward(self, batch: Batch, forward_mode: ForwardMode, return_logprob=False):
         if self.is_multimodal_model and forward_mode == ForwardMode.EXTEND:
             kwargs = {
                 "input_ids": batch.input_ids,
                 "pixel_values": batch.pixel_values,
+                "image_sizes": batch.image_sizes,
                 "image_offsets": batch.image_offsets,
                 "req_pool_indices": batch.req_pool_indices,
                 "seq_lens": batch.seq_lens,
                 "prefix_lens": batch.prefix_lens,
                 "position_ids_offsets": batch.position_ids_offsets,
                 "out_cache_loc": batch.out_cache_loc,
+                "return_logprob": return_logprob,
             }
-            kwargs["return_normalized_logprob"] = return_normalized_logprob
             return self.forward_extend_multi_modal(**kwargs)
         else:
             kwargs = {
@@ -442,6 +484,7 @@ class ModelRunner:
                 "prefix_lens": batch.prefix_lens,
                 "position_ids_offsets": batch.position_ids_offsets,
                 "out_cache_loc": batch.out_cache_loc,
+                "return_logprob": return_logprob,
             }
 
         if forward_mode == ForwardMode.DECODE:
@@ -449,10 +492,8 @@ class ModelRunner:
             kwargs["out_cache_cont_end"] = batch.out_cache_cont_end
             return self.forward_decode(**kwargs)
         elif forward_mode == ForwardMode.EXTEND:
-            kwargs["return_normalized_logprob"] = return_normalized_logprob
             return self.forward_extend(**kwargs)
         elif forward_mode == ForwardMode.PREFILL:
-            kwargs["return_normalized_logprob"] = return_normalized_logprob
             return self.forward_prefill(**kwargs)
         else:
             raise ValueError(f"Invaid forward mode: {forward_mode}")

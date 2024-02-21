@@ -1,6 +1,7 @@
 import asyncio
 import concurrent.futures
 import dataclasses
+import multiprocessing as mp
 import os
 from typing import List
 
@@ -17,9 +18,12 @@ from sglang.srt.hf_transformers_utils import (
 )
 from sglang.srt.managers.io_struct import (
     BatchStrOut,
+    DetokenizeReqInput,
+    FlushCacheReq,
     GenerateReqInput,
     TokenizedGenerateReqInput,
 )
+from sglang.srt.mm_utils import expand2square, process_anyres_image
 from sglang.srt.sampling_params import SamplingParams
 from sglang.srt.server_args import PortArgs, ServerArgs
 from sglang.srt.utils import get_exception_traceback, is_multimodal_model, load_image
@@ -48,14 +52,26 @@ def init_global_processor(server_args: ServerArgs):
     )
 
 
-def get_pixel_values(image_data, processor=None):
+def get_pixel_values(
+    image_data, image_aspect_ratio=None, image_grid_pinpoints=None, processor=None
+):
     try:
         processor = processor or global_processor
         image = load_image(image_data)
         image_hash = hash(image_data)
-        pixel_values = processor.image_processor(image)["pixel_values"][0]
+        if image_aspect_ratio == "pad":
+            image = expand2square(
+                image, tuple(int(x * 255) for x in processor.image_processor.image_mean)
+            )
+            pixel_values = processor.image_processor(image)["pixel_values"][0]
+        elif image_aspect_ratio == "anyres":
+            pixel_values = process_anyres_image(
+                image, processor.image_processor, image_grid_pinpoints
+            )
+        else:
+            pixel_values = processor.image_processor(image)["pixel_values"][0]
         pixel_values = pixel_values.astype(np.float16)
-        return pixel_values, image_hash
+        return pixel_values, image_hash, image.size
     except Exception:
         print("Exception in TokenizerManager:\n" + get_exception_traceback())
 
@@ -77,6 +93,7 @@ class TokenizerManager:
         self.hf_config = get_config(
             self.model_path, trust_remote_code=server_args.trust_remote_code
         )
+
         self.context_len = get_context_length(self.hf_config)
 
         if is_multimodal_model(self.model_path):
@@ -88,7 +105,9 @@ class TokenizerManager:
             self.tokenizer = self.processor.tokenizer
             os.environ["TOKENIZERS_PARALLELISM"] = "false"
             self.executor = concurrent.futures.ProcessPoolExecutor(
-                initializer=init_global_processor, initargs=(server_args,)
+                initializer=init_global_processor,
+                mp_context=mp.get_context("fork"),
+                initargs=(server_args,),
             )
         else:
             self.tokenizer = get_tokenizer(
@@ -101,13 +120,23 @@ class TokenizerManager:
         self.rid_to_state = {}  # Dict[str -> ReqState]
 
     async def get_pixel_values(self, image_data):
+        aspect_ratio = getattr(self.hf_config, "image_aspect_ratio", None)
+        grid_pinpoints = (
+            self.hf_config.image_grid_pinpoints if aspect_ratio == "anyres" else None
+        )
         if self.executor is not None:
             loop = asyncio.get_event_loop()
             return await loop.run_in_executor(
-                self.executor, get_pixel_values, image_data
+                self.executor,
+                get_pixel_values,
+                image_data,
+                aspect_ratio,
+                grid_pinpoints,
             )
         else:
-            return get_pixel_values(image_data, self.processor)
+            return get_pixel_values(
+                image_data, aspect_ratio, grid_pinpoints, self.processor
+            )
 
     async def generate_request(self, obj: GenerateReqInput):
         if self.to_create_loop:
@@ -122,10 +151,17 @@ class TokenizerManager:
             if sampling_params.max_new_tokens != 0:
                 sampling_params.normalize(self.tokenizer)
                 sampling_params.verify()
-            if obj.image_data is None:
-                pixel_values, image_hash = None, None
+
+            if isinstance(obj.image_data, list) and len(obj.image_data) > 0:
+                pixel_values, image_hash, image_size = await self.get_pixel_values(
+                    obj.image_data[0]
+                )
+            elif isinstance(obj.image_data, str):
+                pixel_values, image_hash, image_size = await self.get_pixel_values(
+                    obj.image_data
+                )
             else:
-                pixel_values, image_hash = await self.get_pixel_values(obj.image_data)
+                pixel_values, image_hash, image_size = None, None, None
             if pixel_values is not None :
                 image_tokens_len = (pixel_values.shape[1]/14)**2-1
             else:
@@ -137,12 +173,14 @@ class TokenizerManager:
                 input_ids.extend([input_ids[0]]*int(input_token_len-image_tokens_len-len(input_ids)))
             tokenized_obj = TokenizedGenerateReqInput(
                 rid=rid,
+                input_text=obj.text,
                 input_ids=input_ids,
                 pixel_values=pixel_values,
                 image_hash=image_hash,
+                image_size=image_size,
                 sampling_params=sampling_params,
-                return_normalized_logprob=obj.return_normalized_logprob,
-                normalized_logprob_start_len=obj.normalized_logprob_start_len,
+                return_logprob=obj.return_logprob,
+                logprob_start_len=obj.logprob_start_len,
                 stream=obj.stream,
             )
             self.send_to_router.send_pyobj(tokenized_obj)
@@ -171,9 +209,9 @@ class TokenizerManager:
                     sampling_params.normalize(self.tokenizer)
                     sampling_params.verify()
                 if obj.image_data[i] is None:
-                    pixel_values, image_hash = None, None
+                    pixel_values, image_hash, image_size = None, None, None
                 else:
-                    pixel_values, image_hash = await self.get_pixel_values(
+                    pixel_values, image_hash, image_size = await self.get_pixel_values(
                         obj.image_data[i]
                     )
                 if pixel_values is not None:
@@ -188,12 +226,14 @@ class TokenizerManager:
 
                 tokenized_obj = TokenizedGenerateReqInput(
                     rid=rid,
+                    input_text=obj.text[i],
                     input_ids=input_ids,
                     pixel_values=pixel_values,
                     image_hash=image_hash,
+                    image_size=image_size,
                     sampling_params=sampling_params,
-                    return_normalized_logprob=obj.return_normalized_logprob[i],
-                    normalized_logprob_start_len=obj.normalized_logprob_start_len[i],
+                    return_logprob=obj.return_logprob[i],
+                    logprob_start_len=obj.logprob_start_len[i],
                     stream=obj.stream,
                 )
                 self.send_to_router.send_pyobj(tokenized_obj)
@@ -213,6 +253,14 @@ class TokenizerManager:
                 del self.rid_to_state[rid]
 
             yield output_list
+
+    async def detokenize(self, obj: DetokenizeReqInput):
+        token_texts = self.tokenizer.convert_ids_to_tokens(obj.input_ids)
+        return [t.decode() if isinstance(t, bytes) else t for t in token_texts]
+
+    async def flush_cache(self):
+        flush_cache_req = FlushCacheReq()
+        self.send_to_router.send_pyobj(flush_cache_req)
 
     async def create_handle_loop(self):
         self.to_create_loop = False
