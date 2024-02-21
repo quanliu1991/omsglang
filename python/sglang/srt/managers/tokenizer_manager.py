@@ -18,6 +18,7 @@ from sglang.srt.hf_transformers_utils import (
 )
 from sglang.srt.managers.io_struct import (
     BatchStrOut,
+    DetokenizeReqInput,
     FlushCacheReq,
     GenerateReqInput,
     TokenizedGenerateReqInput,
@@ -150,12 +151,17 @@ class TokenizerManager:
             if sampling_params.max_new_tokens != 0:
                 sampling_params.normalize(self.tokenizer)
                 sampling_params.verify()
-            if obj.image_data is None:
-                pixel_values, image_hash, image_size = None, None, None
-            else:
+
+            if isinstance(obj.image_data, list) and len(obj.image_data) > 0:
+                pixel_values, image_hash, image_size = await self.get_pixel_values(
+                    obj.image_data[0]
+                )
+            elif isinstance(obj.image_data, str):
                 pixel_values, image_hash, image_size = await self.get_pixel_values(
                     obj.image_data
                 )
+            else:
+                pixel_values, image_hash, image_size = None, None, None
             tokenized_obj = TokenizedGenerateReqInput(
                 rid=rid,
                 input_text=obj.text,
@@ -228,6 +234,10 @@ class TokenizerManager:
                 del self.rid_to_state[rid]
 
             yield output_list
+
+    async def detokenize(self, obj: DetokenizeReqInput):
+        token_texts = self.tokenizer.convert_ids_to_tokens(obj.input_ids)
+        return [t.decode() if isinstance(t, bytes) else t for t in token_texts]
 
     async def flush_cache(self):
         flush_cache_req = FlushCacheReq()

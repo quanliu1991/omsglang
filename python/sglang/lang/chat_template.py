@@ -118,6 +118,21 @@ register_chat_template(
 
 register_chat_template(
     ChatTemplate(
+        name="chatml-llava",
+        default_system_prompt="Answer the questions.",
+        role_prefix_and_suffix={
+            "system": ("<|im_start|>system\n", "\n<|im_end|>\n"),
+            "user": ("<|im_start|>user\n", "\n<|im_end|>\n"),
+            "assistant": ("<|im_start|>assistant\n", "\n<|im_end|>\n"),
+        },
+        style=ChatTemplateStyle.PLAIN,
+        stop_str=("<|im_end|>",),
+        image_token=" <image>\n",
+    )
+)
+
+register_chat_template(
+    ChatTemplate(
         name="vicuna_v1.1",
         default_system_prompt=(
             "A chat between a curious user and an artificial intelligence assistant. "
@@ -146,12 +161,29 @@ register_chat_template(
     )
 )
 
+# Reference: https://github.com/01-ai/Yi/tree/main/VL#major-difference-with-llava
+register_chat_template(
+    ChatTemplate(
+        name="yi",
+        default_system_prompt=(
+            "This is a chat between an inquisitive human and an AI assistant. Assume the role of the AI assistant. Read all the images carefully, and respond to the human's questions with informative, helpful, detailed and polite answers."
+            "这是一个好奇的人类和一个人工智能助手之间的对话。假设你扮演这个AI助手的角色。仔细阅读所有的图像，并对人类的问题做出信息丰富、有帮助、详细的和礼貌的回答。"
+        ),
+        role_prefix_and_suffix={
+            "system": ("", "\n\n"),
+            "user": ("### Human:", "\n"),
+            "assistant": ("### Assistant:", "\n"),
+        },
+        image_token=" <image_placeholder>\n",
+    )
+)
+
 
 @register_chat_template_matching_function
 def match_vicuna(model_path: str):
     if "vicuna" in model_path.lower():
         return get_chat_template("vicuna_v1.1")
-    if "llava" in model_path.lower():
+    if "llava-v1.5" in model_path.lower():
         return get_chat_template("vicuna_v1.1")
 
 
@@ -175,6 +207,15 @@ def match_chat_ml(model_path: str):
         return get_chat_template("chatml")
     if "qwen" in model_path and "chat" in model_path:
         return get_chat_template("chatml")
+    if "llava-v1.6-34b" in model_path:
+        return get_chat_template("chatml-llava")
+
+
+@register_chat_template_matching_function
+def match_chat_yi(model_path: str):
+    model_path = model_path.lower()
+    if "yi" in model_path:
+        return get_chat_template("yi")
 
 
 if __name__ == "__main__":

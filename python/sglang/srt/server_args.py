@@ -1,6 +1,6 @@
 import argparse
 import dataclasses
-from typing import List, Optional
+from typing import List, Optional, Union
 
 
 @dataclasses.dataclass
@@ -9,11 +9,14 @@ class ServerArgs:
     tokenizer_path: Optional[str] = None
     host: str = "127.0.0.1"
     port: int = 30000
+    additional_ports: Optional[Union[List[int], int]] = None
     load_format: str = "auto"
     tokenizer_mode: str = "auto"
     chat_template: Optional[str] = None
     trust_remote_code: bool = True
     mem_fraction_static: Optional[float] = None
+    max_prefill_num_token: Optional[int] = None
+    context_length: Optional[int] = None
     tp_size: int = 1
     model_mode: List[str] = ()
     schedule_heuristic: str = "lpm"
@@ -23,7 +26,8 @@ class ServerArgs:
     disable_log_stats: bool = False
     log_stats_interval: int = 10
     log_level: str = "info"
-    no_regex_fast_forward: bool = False
+    disable_regex_jump_forward: bool = False
+    disable_disk_cache: bool = False
 
     def __post_init__(self):
         if self.tokenizer_path is None:
@@ -37,6 +41,10 @@ class ServerArgs:
                 self.mem_fraction_static = 0.85
             else:
                 self.mem_fraction_static = 0.90
+        if isinstance(self.additional_ports, int):
+            self.additional_ports = [self.additional_ports]
+        elif self.additional_ports is None:
+            self.additional_ports = []
 
     @staticmethod
     def add_cli_args(parser: argparse.ArgumentParser):
@@ -54,6 +62,14 @@ class ServerArgs:
         )
         parser.add_argument("--host", type=str, default=ServerArgs.host)
         parser.add_argument("--port", type=int, default=ServerArgs.port)
+        # we want to be able to pass a list of ports
+        parser.add_argument(
+            "--additional-ports",
+            type=int,
+            nargs="*",
+            default=[],
+            help="Additional ports specified for launching server.",
+        )
         parser.add_argument(
             "--load-format",
             type=str,
@@ -95,6 +111,18 @@ class ServerArgs:
             type=float,
             default=ServerArgs.mem_fraction_static,
             help="The fraction of the memory used for static allocation (model weights and KV cache memory pool). Use a smaller value if you see out-of-memory errors.",
+        )
+        parser.add_argument(
+            "--max-prefill-num-token",
+            type=int,
+            default=ServerArgs.max_prefill_num_token,
+            help="The maximum number of tokens in a prefill batch. The real bound will be the maximum of this value and the model's maximum context length.",
+        )
+        parser.add_argument(
+            "--context-length",
+            type=int,
+            default=ServerArgs.context_length,
+            help="The model's maximum context length. Use this to reduce the context length to save memory. Defaults to None (will use the value from the model's config.json instead).",
         )
         parser.add_argument(
             "--tp-size",
@@ -152,9 +180,14 @@ class ServerArgs:
             help="Log stats interval in second.",
         )
         parser.add_argument(
-            "--no-regex-fast-forward",
+            "--disable-regex-jump-forward",
             action="store_true",
-            help="Disable regex fast forward",
+            help="Disable regex jump-forward",
+        )
+        parser.add_argument(
+            "--disable-disk-cache",
+            action="store_true",
+            help="Disable disk cache to avoid possible crashes related to file system or high concurrency.",
         )
 
     @classmethod
