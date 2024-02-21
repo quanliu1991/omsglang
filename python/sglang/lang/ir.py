@@ -126,11 +126,9 @@ class SglFunction:
         ignore_eos: bool = False,
         stream: bool = False,
         backend=None,
-        fixed_length: Optional[tuple] = (None,None),
         **kwargs,
     ):
         from sglang.lang.interpreter import run_program
-
         default_sampling_para = SglSamplingParams(
             max_new_tokens=max_new_tokens,
             stop=stop,
@@ -140,7 +138,6 @@ class SglFunction:
             frequency_penalty=frequency_penalty,
             presence_penalty=presence_penalty,
             ignore_eos=ignore_eos,
-            fixed_length=fixed_length,
         )
         backend = backend or global_config.default_backend
         return run_program(self, backend, args, kwargs, default_sampling_para, stream)

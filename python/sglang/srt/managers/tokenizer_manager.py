@@ -127,17 +127,14 @@ class TokenizerManager:
             else:
                 pixel_values, image_hash = await self.get_pixel_values(obj.image_data)
             if pixel_values is not None :
-                image_tokens_len = (pixel_values.shape[1]/14)**2
+                image_tokens_len = (pixel_values.shape[1]/14)**2-1
             else:
                 image_tokens_len = 0
             input_token_len = sampling_params.fixed_length[0]
             if (len(input_ids) + image_tokens_len) >= input_token_len:
                 input_ids=input_ids[:int(input_token_len-image_tokens_len)]
             else:
-                input_ids.extend([input_ids[0]]*int(input_token_len-image_tokens_len-len(input_ids)+1))
-            print(image_tokens_len)
-            print(len(input_ids))
-            print(len(input_ids)+image_tokens_len)
+                input_ids.extend([input_ids[0]]*int(input_token_len-image_tokens_len-len(input_ids)))
             tokenized_obj = TokenizedGenerateReqInput(
                 rid=rid,
                 input_ids=input_ids,
@@ -180,14 +177,14 @@ class TokenizerManager:
                         obj.image_data[i]
                     )
                 if pixel_values is not None:
-                    image_tokens_len = (pixel_values.shape[1] / 14) ** 2
+                    image_tokens_len = (pixel_values.shape[1] / 14) ** 2-1
                 else:
                     image_tokens_len = 0
                 input_token_len = sampling_params.fixed_length[0]
                 if (len(input_ids) + image_tokens_len) >= input_token_len:
                     input_ids = input_ids[:int(input_token_len - image_tokens_len)]
                 else:
-                    input_ids.extend([input_ids[0]] * int(input_token_len - image_tokens_len - len(input_ids) + 1))
+                    input_ids.extend([input_ids[0]] * int(input_token_len - image_tokens_len - len(input_ids)))
 
                 tokenized_obj = TokenizedGenerateReqInput(
                     rid=rid,

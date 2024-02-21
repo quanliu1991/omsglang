@@ -18,6 +18,7 @@ class SamplingParams:
         skip_special_tokens: bool = True,
         dtype: Optional[str] = None,
         regex: Optional[str] = None,
+        fixed_length: Optional[tuple] = (None,None)
     ) -> None:
         self.temperature = temperature
         self.top_p = top_p
@@ -30,7 +31,7 @@ class SamplingParams:
         self.skip_special_tokens = skip_special_tokens
         self.dtype = dtype
         self.regex = regex
-
+        self.fixed_length = fixed_length
         # Process some special cases
         if self.temperature < _SAMPLING_EPS:
             self.temperature = 1.0
