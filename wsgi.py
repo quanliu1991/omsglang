@@ -30,10 +30,10 @@ async def startup_event():
     for model_id in model_ids:
         try:
             app.state.detector.load_model(model_id)
-            logger.info(f"load {model_id} model success.")
+            logging.info(f"load {model_id} model success.")
             break
         except:
-            logger.warning(f"load {model_id} model failed.")
+            logging.warning(f"load {model_id} model failed.")
             break
 
 router = UdfAPIRoute()
@@ -41,7 +41,7 @@ router = UdfAPIRoute()
 @router.post("/v1/process/batch_infer", response_model=BatchResponse, name="batch_infer")
 async def detect_urls(request: Request, body: BatchQueryBody) -> BatchResponse:
     s_time = time.time()
-    engine: Engine = request.app.state.detector
+    engine: SGLangEngine = request.app.state.detector
     try:
         res = await engine.batch_predict(
             model_id=body.model_id,
@@ -64,7 +64,7 @@ async def detect_urls(request: Request, body: BatchQueryBody) -> BatchResponse:
 @router.post("/v1/process/profromance_banchmark", response_model=BatchResponse, name="batch_infer")
 async def detect_urls(request: Request, body: BatchQueryBody) -> BatchResponse:
     s_time = time.time()
-    engine: Engine = request.app.state.detector
+    engine: SGLangEngine = request.app.state.detector
     fixed_length = (body.input_tokens_number,body.output_tokens_number)
     try:
         res = await engine.profromance_banchmark(
@@ -74,10 +74,12 @@ async def detect_urls(request: Request, body: BatchQueryBody) -> BatchResponse:
             temperature=body.temperature,
             max_tokens=body.max_tokens,
             top_p=body.top_p,
-            fixed_length=fixed_length
+            fixed_length=fixed_length,
+            parallel=body.parallel,
+            ignore_eos=body.ignore_eos
         )
     except Exception as error:
-        logger.error(traceback.format_exc())
+        logging.error(traceback.format_exc())
         resp = Response(took=(time.time() - s_time) * 1000, code=500, error=error)
         return resp
     resp = BatchResponse(took=(time.time() - s_time) * 1000, code=200, answer=res)
