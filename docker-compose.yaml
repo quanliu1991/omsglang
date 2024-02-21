@@ -1,0 +1,23 @@
+sglang_infer:
+    image: registry.linker.cc/linker/sglang_base_line_dev:v0.0.0
+#    build: .
+#    command: tail -f /dev/null
+    ports:
+      - '8229:8000'
+#      - '8222:22'
+    volumes:
+#      - /data3/lq/projects/vllm/sglang:/app
+      - /data3/lq/projects/vllm/llm_models:/app/llm_models
+    environment:
+      - NUM_WORKER=1
+    shm_size: 40gb
+    container_name: sglang_inf_test
+    restart: always
+
+    privileged: true
+#    deploy:
+#      resources:
+#        reservations:
+#          devices:
+#          - driver: nvidia
+#            capabilities: [gpu]
