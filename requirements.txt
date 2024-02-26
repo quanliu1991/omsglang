@@ -1,0 +1,11 @@
+uvicorn==0.16.0
+uvloop==0.19.0
+vllm==0.3.1
+outlines==0.0.30
+rpyc==5.3.1
+#pydantic==1.10.14
+linker-atom==0.0.35
+starlette
+anyio
+sniffio
+#fastapi==0.83.0

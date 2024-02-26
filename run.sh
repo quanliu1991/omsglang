@@ -1,4 +1,4 @@
 export PYTHONPATH=/app/python
 echo "this is /app/run.sh"
-python python/sglang/launch_server.py &
-python wsgi.py
+python3 python/sglang/launch_server.py &
+python3 wsgi.py

@@ -1,5 +1,5 @@
 sglang_infer:
-    image: registry.linker.cc/linker/sglang_base_line_dev:v0.0.0
+    image: registry.linker.cc/linker/sglang_base_line_dev:v0.0.2
 #    build: .
 #    command: tail -f /dev/null
     ports:
@@ -15,7 +15,7 @@ sglang_infer:
     restart: always
 
     privileged: true
-#    deploy:
+  #    deploy:
 #      resources:
 #        reservations:
 #          devices:
