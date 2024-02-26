@@ -112,7 +112,7 @@ class SGLangEngine:
                               "image_file": prompt.image,
                               "question": prompt.records[0].user,
                               "max_tokens": fixed_length[1],
-                              "ignore_eos": ignore_eos,
+                              "gen_ignore_eos": ignore_eos,
                               "fixed_length": fixed_length
                               })
 
