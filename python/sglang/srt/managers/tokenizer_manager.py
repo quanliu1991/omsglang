@@ -167,10 +167,11 @@ class TokenizerManager:
             else:
                 image_tokens_len = 0
             input_token_len = sampling_params.fixed_length[0]
-            if (len(input_ids) + image_tokens_len) >= input_token_len:
-                input_ids=input_ids[:int(input_token_len-image_tokens_len)]
-            else:
-                input_ids.extend([input_ids[0]]*int(input_token_len-image_tokens_len-len(input_ids)))
+            if input_token_len:
+                if (len(input_ids) + image_tokens_len) >= input_token_len:
+                    input_ids=input_ids[:int(input_token_len-image_tokens_len)]
+                else:
+                    input_ids.extend([input_ids[0]]*int(input_token_len-image_tokens_len-len(input_ids)))
             tokenized_obj = TokenizedGenerateReqInput(
                 rid=rid,
                 input_text=obj.text,
@@ -219,11 +220,11 @@ class TokenizerManager:
                 else:
                     image_tokens_len = 0
                 input_token_len = sampling_params.fixed_length[0]
-                if (len(input_ids) + image_tokens_len) >= input_token_len:
-                    input_ids = input_ids[:int(input_token_len - image_tokens_len)]
-                else:
-                    input_ids.extend([input_ids[0]] * int(input_token_len - image_tokens_len - len(input_ids)))
-
+                if input_token_len:
+                    if (len(input_ids) + image_tokens_len) >= input_token_len:
+                        input_ids = input_ids[:int(input_token_len - image_tokens_len)]
+                    else:
+                        input_ids.extend([input_ids[0]] * int(input_token_len - image_tokens_len - len(input_ids)))
                 tokenized_obj = TokenizedGenerateReqInput(
                     rid=rid,
                     input_text=obj.text[i],
